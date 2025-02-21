@@ -5,3 +5,9 @@ pandas
 scikit-learn
 xgboost
 matplotlib
+yfinance
+numpy
+pandas
+scikit-learn
+xgboost
+matplotlib
