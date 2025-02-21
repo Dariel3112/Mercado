@@ -19,16 +19,18 @@ import streamlit as st
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class TrendAnalyzer:
-    def __init__(self, tickers: list, start_date: str, end_date: str) -> None:
+    def __init__(self, tickers: list, start_date: str, end_date: str, forecast_shift: int = 1) -> None:
         """
         Inicializa o analisador de tendências.
         :param tickers: Lista de tickers. Para ações brasileiras que terminam com dígito, ".SA" será adicionado.
         :param start_date: Data de início (formato 'YYYY-MM-DD').
         :param end_date: Data de término (formato 'YYYY-MM-DD').
+        :param forecast_shift: Número de períodos (dias) à frente para prever a tendência.
         """
         self.tickers = tickers
         self.start_date = start_date
         self.end_date = end_date
+        self.forecast_shift = forecast_shift
         self.data = {}
         self.models = {}
         self.prepared_data = {}
@@ -100,7 +102,7 @@ class TrendAnalyzer:
     def prepare_data(self) -> None:
         """
         Prepara os dados para treinamento e teste, utilizando os indicadores técnicos como features.
-        A variável alvo (y) indica se o fechamento do próximo período será de alta (1) ou baixa (0).
+        A variável alvo (y) indica se o fechamento do período de previsão (forecast_shift dias à frente) será de alta (1) ou baixa (0).
         """
         for ticker, df in self.data.items():
             try:
@@ -111,8 +113,10 @@ class TrendAnalyzer:
                     st.warning(f"Indicadores faltando para {ticker}.")
                     continue
 
-                X = df[features].iloc[:-1]  # Exclui última linha sem target
-                y = np.where(df['Close'].shift(-1).iloc[:-1] > df['Close'].iloc[:-1], 1, 0)
+                # Ajusta os dados com base no forecast_shift
+                shift_val = self.forecast_shift
+                X = df[features].iloc[:-shift_val]  # Remove as últimas linhas sem target
+                y = np.where(df['Close'].shift(-shift_val).iloc[:-shift_val] > df['Close'].iloc[:-shift_val], 1, 0)
 
                 X_train, X_test, y_train, y_test = train_test_split(
                     X, y, test_size=0.2, random_state=42, stratify=y
@@ -197,7 +201,8 @@ class TrendAnalyzer:
 
     def predict_daily(self) -> pd.DataFrame:
         """
-        Realiza previsões diárias utilizando cada modelo e sugere operações de compra ou venda.
+        Realiza previsões para o período de previsão definido (forecast_shift dias à frente)
+        e sugere operações de compra ou venda.
         Retorna um DataFrame com os resultados para facilitar a visualização e o download.
         """
         results = []
@@ -220,7 +225,6 @@ class TrendAnalyzer:
             except Exception as e:
                 st.error(f"Erro na previsão para {ticker}: {e}")
         pred_df = pd.DataFrame(results)
-        # Acrescenta os resultados ao relatório em formato texto, se desejado
         self.report += "\n--- Previsões Diárias e Sugestões ---\n"
         for index, row in pred_df.iterrows():
             self.report += f"\nTicker: {row['Ticker']}\n"
@@ -272,6 +276,7 @@ tickers_default = [
 custom_tickers = st.sidebar.text_input("Insira os tickers (separados por vírgula)", value=", ".join(tickers_default))
 start_date_input = st.sidebar.date_input("Data de Início", date.today() - timedelta(days=365))
 end_date_input = st.sidebar.date_input("Data de Término", date.today())
+forecast_shift = st.sidebar.number_input("Período de Previsão (dias à frente)", min_value=1, value=1, step=1)
 
 st.sidebar.header("Etapas a Executar")
 run_fetch = st.sidebar.checkbox("Buscar Dados", value=True)
@@ -284,7 +289,7 @@ if st.sidebar.button("Executar Análise Completa"):
     with st.spinner("Executando análise..."):
         # Processa os tickers informados
         tickers = [t.strip() for t in custom_tickers.split(",") if t.strip()]
-        analyzer = TrendAnalyzer(tickers, str(start_date_input), str(end_date_input))
+        analyzer = TrendAnalyzer(tickers, str(start_date_input), str(end_date_input), forecast_shift=forecast_shift)
         pred_df = analyzer.run_pipeline(run_fetch=run_fetch, run_prepare=run_prepare, run_train=run_train,
                                         run_evaluate=run_evaluate, run_predict=run_predict)
         st.success("Análise concluída!")
