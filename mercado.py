@@ -5,7 +5,7 @@ import logging
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
@@ -18,6 +18,7 @@ import streamlit as st
 # Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Classe de análise de tendências
 class TrendAnalyzer:
     def __init__(self, tickers: list, start_date: str, end_date: str) -> None:
         """
@@ -30,15 +31,11 @@ class TrendAnalyzer:
         self.start_date = start_date
         self.end_date = end_date
         self.data = {}
-        # Cada ticker terá um dicionário com os três modelos
         self.models = {}
         self.prepared_data = {}
         self.report = ""
 
     def _get_symbol(self, ticker: str) -> str:
-        """
-        Retorna o símbolo adequado para o yfinance.
-        """
         if "." in ticker or "=" in ticker:
             return ticker
         return ticker + ".SA"
@@ -50,16 +47,16 @@ class TrendAnalyzer:
         for ticker in self.tickers:
             symbol = self._get_symbol(ticker)
             try:
-                logging.info(f"Buscando dados para {ticker} ({symbol})...")
+                st.write(f"Buscando dados para {ticker} ({symbol})...")
                 df = yf.download(symbol, start=self.start_date, end=self.end_date)
                 if df.empty:
-                    logging.warning(f"Nenhum dado retornado para {ticker}.")
+                    st.warning(f"Nenhum dado retornado para {ticker}.")
                     continue
                 df = self._calculate_technical_indicators(df)
                 df.dropna(inplace=True)
                 self.data[ticker] = df
             except Exception as e:
-                logging.error(f"Erro ao buscar dados para {ticker}: {e}")
+                st.error(f"Erro ao buscar dados para {ticker}: {e}")
 
     def _calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -101,11 +98,11 @@ class TrendAnalyzer:
         """
         for ticker, df in self.data.items():
             try:
-                logging.info(f"Preparando dados para {ticker}...")
+                st.write(f"Preparando dados para {ticker}...")
                 features = ['MA20', 'MA50', 'Daily_Return', 'RSI', 'Volume',
                             'BB_upper', 'BB_lower', 'MACD', 'Signal_Line']
                 if not all(feature in df.columns for feature in features):
-                    logging.warning(f"Indicadores faltando para {ticker}.")
+                    st.warning(f"Indicadores faltando para {ticker}.")
                     continue
 
                 X = df[features].iloc[:-1]  # Exclui última linha sem target
@@ -128,7 +125,7 @@ class TrendAnalyzer:
                     'feature_names': features
                 }
             except Exception as e:
-                logging.error(f"Erro ao preparar dados para {ticker}: {e}")
+                st.error(f"Erro ao preparar dados para {ticker}: {e}")
 
     def train_models(self) -> None:
         """
@@ -137,28 +134,28 @@ class TrendAnalyzer:
         for ticker, pdata in self.prepared_data.items():
             self.models[ticker] = {}
             try:
-                logging.info(f"Treinando RandomForest para {ticker}...")
+                st.write(f"Treinando RandomForest para {ticker}...")
                 rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
                 rf_model.fit(pdata['X_train'], pdata['y_train'])
                 self.models[ticker]['RandomForest'] = rf_model
             except Exception as e:
-                logging.error(f"Erro ao treinar RandomForest para {ticker}: {e}")
+                st.error(f"Erro ao treinar RandomForest para {ticker}: {e}")
 
             try:
-                logging.info(f"Treinando XGBoost para {ticker}...")
+                st.write(f"Treinando XGBoost para {ticker}...")
                 xgb_model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
                 xgb_model.fit(pdata['X_train'], pdata['y_train'])
                 self.models[ticker]['XGBoost'] = xgb_model
             except Exception as e:
-                logging.error(f"Erro ao treinar XGBoost para {ticker}: {e}")
+                st.error(f"Erro ao treinar XGBoost para {ticker}: {e}")
 
             try:
-                logging.info(f"Treinando Logistic Regression para {ticker}...")
+                st.write(f"Treinando Logistic Regression para {ticker}...")
                 lr_model = LogisticRegression(max_iter=1000, random_state=42)
                 lr_model.fit(pdata['X_train'], pdata['y_train'])
                 self.models[ticker]['LogisticRegression'] = lr_model
             except Exception as e:
-                logging.error(f"Erro ao treinar Logistic Regression para {ticker}: {e}")
+                st.error(f"Erro ao treinar Logistic Regression para {ticker}: {e}")
 
     def evaluate_models(self) -> None:
         """
@@ -222,49 +219,53 @@ class TrendAnalyzer:
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(self.report)
-            logging.info(f"Relatório salvo em: {file_path}")
+            st.info(f"Relatório salvo em: {file_path}")
         except Exception as e:
-            logging.error(f"Erro ao salvar relatório: {e}")
+            st.error(f"Erro ao salvar relatório: {e}")
 
-    def serve_report_streamlit(self) -> None:
+    def run_pipeline(self, run_fetch=True, run_prepare=True, run_train=True, run_evaluate=True, run_predict=True) -> None:
         """
-        Exibe o relatório utilizando Streamlit.
+        Executa o pipeline completo conforme as etapas selecionadas.
         """
-        st.title("Relatório de Análise de Tendências")
-        st.text_area("Relatório", self.report, height=600)
-
-    def run_analysis(self) -> None:
-        """
-        Executa todo o pipeline: coleta de dados, preparação, treinamento, avaliação, previsão e salvamento do relatório.
-        """
-        self.fetch_data()
-        self.prepare_data()
-        self.train_models()
-        self.evaluate_models()
-        self.predict_daily()
+        if run_fetch:
+            self.fetch_data()
+        if run_prepare:
+            self.prepare_data()
+        if run_train:
+            self.train_models()
+        if run_evaluate:
+            self.evaluate_models()
+        if run_predict:
+            self.predict_daily()
         self.save_report()
 
-if __name__ == "__main__":
-    # Tickers do IBOVESPA (serão convertidos para ".SA" se necessário)
-    tickers_ibovespa = [
-        'PETR4', 'VALE3', 'ITUB4', 'BBDC4', 'BBAS3', 'ABEV3', 'WEGE3', 'RENT3',
-        'EQTL3', 'RADL3', 'VIVT3', 'HAPV3', 'RAIL3', 'SUZB3', 'LREN3', 'GGBR4',
-        'CSNA3', 'EMBR3', 'JBSS3', 'PRIO3', 'KLBN11', 'YDUQ3', 'CCRO3', 'CPFE3',
-        'EGIE3', 'BRFS3', 'BRAP4', 'SANB11', 'UGPA3', 'CMIG4'
-    ]
-    
-    # Tickers internacionais e do dólar frente ao real
-    tickers_internacionais = [
-        'NVDA', 'IVV', 'VOO', 'USDBRL=X'
-    ]
-    
-    tickers = tickers_ibovespa + tickers_internacionais
+# Interface Streamlit
+st.title("Análise de Tendências - Interface Interativa")
 
-    start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    
-    analyzer = TrendAnalyzer(tickers, start_date, end_date)
-    analyzer.run_analysis()
-    
-    # Exibe o relatório via Streamlit
-    analyzer.serve_report_streamlit()
+st.sidebar.header("Configurações")
+# Tickers padrão (você pode editar esta lista)
+tickers_default = [
+    'PETR4', 'VALE3', 'ITUB4', 'BBDC4', 'BBAS3', 'ABEV3', 'WEGE3', 'RENT3',
+    'EQTL3', 'RADL3', 'VIVT3', 'HAPV3', 'RAIL3', 'SUZB3', 'LREN3', 'GGBR4',
+    'CSNA3', 'EMBR3', 'JBSS3', 'PRIO3', 'KLBN11', 'YDUQ3', 'CCRO3', 'CPFE3',
+    'EGIE3', 'BRFS3', 'BRAP4', 'SANB11', 'UGPA3', 'CMIG4', 'NVDA', 'IVV', 'VOO', 'USDBRL=X'
+]
+custom_tickers = st.sidebar.text_input("Insira os tickers (separados por vírgula)", value=", ".join(tickers_default))
+start_date_input = st.sidebar.date_input("Data de Início", date.today() - timedelta(days=365))
+end_date_input = st.sidebar.date_input("Data de Término", date.today())
+
+st.sidebar.header("Etapas a Executar")
+run_fetch = st.sidebar.checkbox("Buscar Dados", value=True)
+run_prepare = st.sidebar.checkbox("Preparar Dados", value=True)
+run_train = st.sidebar.checkbox("Treinar Modelos", value=True)
+run_evaluate = st.sidebar.checkbox("Avaliar Modelos", value=True)
+run_predict = st.sidebar.checkbox("Previsões Diárias", value=True)
+
+if st.sidebar.button("Executar Análise Completa"):
+    with st.spinner("Executando análise..."):
+        # Processa os tickers informados
+        tickers = [t.strip() for t in custom_tickers.split(",") if t.strip()]
+        analyzer = TrendAnalyzer(tickers, str(start_date_input), str(end_date_input))
+        analyzer.run_pipeline(run_fetch=run_fetch, run_prepare=run_prepare, run_train=run_train, run_evaluate=run_evaluate, run_predict=run_predict)
+        st.success("Análise concluída!")
+        st.text_area("Relatório Gerado", analyzer.report, height=600)
