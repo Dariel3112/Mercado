@@ -47,7 +47,7 @@ class TrendAnalyzer:
         self.tickers = tickers
         self.start_date = start_date
         self.end_date = end_date
-        self.forecast_shift = forecast_shift  # Único valor para todos os tickers
+        self.forecast_shift = forecast_shift
         self.data = {}
         self.models = {}
         self.model_scores = {}
@@ -82,13 +82,20 @@ class TrendAnalyzer:
             else:
                 logging.info(f"Buscando dados para {ticker} ({symbol})...")
                 df = yf.download(symbol, start=self.start_date, end=self.end_date)
-                if not isinstance(df, pd.DataFrame) or df.empty or 'Close' not in df.columns:
-                    if isinstance(df, pd.DataFrame) and 'Adj Close' in df.columns:
+                if not isinstance(df, pd.DataFrame) or df.empty:
+                    logging.warning(f"Dados inválidos retornados para {ticker}: {type(df)}")
+                    return ticker, None
+                if 'Close' not in df.columns:
+                    if 'Adj Close' in df.columns:
                         df['Close'] = df['Adj Close']
                         logging.info(f"Usando 'Adj Close' como 'Close' para {ticker}.")
                     else:
-                        logging.warning(f"Dados inválidos retornados para {ticker}: {type(df)}")
+                        logging.warning(f"Coluna 'Close' não encontrada para {ticker}.")
                         return ticker, None
+                # Verifica se há dados suficientes para médias móveis
+                if len(df) < 50:  # MA50 requer pelo menos 50 linhas
+                    logging.warning(f"Dados insuficientes para {ticker}: apenas {len(df)} linhas.")
+                    return ticker, None
                 with open(cache_file, 'wb') as f:
                     pickle.dump(df, f)
             df = self._check_data_continuity(df)
@@ -96,6 +103,9 @@ class TrendAnalyzer:
             if df is None:
                 return ticker, None
             df.dropna(inplace=True)
+            if len(df) < 50:  # Verifica novamente após dropna
+                logging.warning(f"Dados insuficientes após limpeza para {ticker}: {len(df)} linhas.")
+                return ticker, None
             return ticker, df
 
         with ThreadPoolExecutor() as executor:
@@ -113,29 +123,36 @@ class TrendAnalyzer:
         if 'Close' not in df.columns:
             logging.error("Coluna 'Close' não encontrada no DataFrame.")
             return None
+        # Garante que o índice seja ordenado e único
+        df = df.sort_index()
+        df = df[~df.index.duplicated(keep='first')]
 
-        for w in ma_windows:
-            df[f'MA{w}'] = df['Close'].rolling(window=w).mean()
-        df['Daily_Return'] = df['Close'].pct_change()
-        df['RSI'] = self._calculate_rsi(df)
+        try:
+            for w in ma_windows:
+                df[f'MA{w}'] = df['Close'].rolling(window=w, min_periods=1).mean()
+            df['Daily_Return'] = df['Close'].pct_change()
+            df['RSI'] = self._calculate_rsi(df)
 
-        std_window = ma_windows[0]
-        df[f'STD{std_window}'] = df['Close'].rolling(window=std_window).std()
-        df['BB_upper'] = df[f'MA{std_window}'] + (2 * df[f'STD{std_window}'])
-        df['BB_lower'] = df[f'MA{std_window}'] - (2 * df[f'STD{std_window}'])
+            std_window = ma_windows[0]
+            df[f'STD{std_window}'] = df['Close'].rolling(window=std_window, min_periods=1).std()
+            df['BB_upper'] = df[f'MA{std_window}'] + (2 * df[f'STD{std_window}'])
+            df['BB_lower'] = df[f'MA{std_window}'] - (2 * df[f'STD{std_window}'])
 
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = ema12 - ema26
-        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        return df
+            ema12 = df['Close'].ewm(span=12, adjust=False).mean()
+            ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+            df['MACD'] = ema12 - ema26
+            df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+            return df
+        except Exception as e:
+            logging.error(f"Erro ao calcular indicadores técnicos: {e}")
+            return None
 
     def _calculate_rsi(self, df: pd.DataFrame, periods: int = 14) -> pd.Series:
         delta = df['Close'].diff()
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
-        avg_gain = gain.ewm(alpha=1/periods, min_periods=periods).mean()
-        avg_loss = loss.ewm(alpha=1/periods, min_periods=periods).mean()
+        avg_gain = gain.ewm(alpha=1/periods, min_periods=1).mean()
+        avg_loss = loss.ewm(alpha=1/periods, min_periods=1).mean()
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
         return rsi
@@ -157,7 +174,7 @@ class TrendAnalyzer:
                 y_full = np.where(df['Close'].shift(-self.forecast_shift).iloc[:-self.forecast_shift] > df['Close'].iloc[:-self.forecast_shift], 1, 0)
 
                 n = len(X_full)
-                cutoff = int(n * 0.8)  # 80% treino, 20% teste
+                cutoff = int(n * 0.8)
                 X_train, X_test = X_full.iloc[:cutoff], X_full.iloc[cutoff:]
                 y_train, y_test = y_full[:cutoff], y_full[cutoff:]
 
