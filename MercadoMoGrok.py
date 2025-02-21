@@ -17,7 +17,7 @@ import streamlit as st
 from concurrent.futures import ThreadPoolExecutor
 import pickle
 
-# Configuração do logging (sem mudanças)
+# Configuração do logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -27,7 +27,6 @@ logging.basicConfig(
     ]
 )
 
-# Classe TrendAnalyzer (sem mudanças, mantida como no código anterior)
 class TrendAnalyzer:
     def __init__(self, tickers: list, start_date: str, end_date: str, forecast_shift: dict = None) -> None:
         self.tickers = tickers
@@ -67,13 +66,15 @@ class TrendAnalyzer:
             else:
                 logging.info(f"Buscando dados para {ticker} ({symbol})...")
                 df = yf.download(symbol, start=self.start_date, end=self.end_date)
-                if df.empty:
-                    logging.warning(f"Nenhum dado retornado para {ticker}.")
+                if df.empty or 'Close' not in df.columns:
+                    logging.warning(f"Nenhum dado válido retornado para {ticker}.")
                     return ticker, None
                 with open(cache_file, 'wb') as f:
                     pickle.dump(df, f)
             df = self._check_data_continuity(df)
             df = self._calculate_technical_indicators(df)
+            if df is None:
+                return ticker, None
             df.dropna(inplace=True)
             return ticker, df
 
@@ -86,22 +87,31 @@ class TrendAnalyzer:
                 st.warning(f"Falha ao carregar dados para {ticker}.")
 
     def _calculate_technical_indicators(self, df: pd.DataFrame, ma_windows=(20, 50)) -> pd.DataFrame:
+        # Verifica se 'Close' existe (ajustando para possíveis variações de capitalização)
+        close_col = [col for col in df.columns if col.lower() == 'close']
+        if not close_col:
+            logging.error("Coluna 'Close' não encontrada no DataFrame.")
+            return None
+        close_col = close_col[0]  # Usa a primeira correspondência (ex.: 'Close' ou 'close')
+
         for w in ma_windows:
-            df[f'MA{w}'] = df['Close'].rolling(window=w).mean()
-        df['Daily_Return'] = df['Close'].pct_change()
-        df['RSI'] = self._calculate_rsi(df)
+            df[f'MA{w}'] = df[close_col].rolling(window=w).mean()
+        df['Daily_Return'] = df[close_col].pct_change()
+        df['RSI'] = self._calculate_rsi(df, close_col)
+
         std_window = ma_windows[0]
-        df[f'STD{std_window}'] = df['Close'].rolling(window=std_window).std()
+        df[f'STD{std_window}'] = df[close_col].rolling(window=std_window).std()
         df['BB_upper'] = df[f'MA{std_window}'] + (2 * df[f'STD{std_window}'])
         df['BB_lower'] = df[f'MA{std_window}'] - (2 * df[f'STD{std_window}'])
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
+
+        ema12 = df[close_col].ewm(span=12, adjust=False).mean()
+        ema26 = df[close_col].ewm(span=26, adjust=False).mean()
         df['MACD'] = ema12 - ema26
         df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
         return df
 
-    def _calculate_rsi(self, df: pd.DataFrame, periods: int = 14) -> pd.Series:
-        delta = df['Close'].diff()
+    def _calculate_rsi(self, df: pd.DataFrame, close_col: str, periods: int = 14) -> pd.Series:
+        delta = df[close_col].diff()
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
         avg_gain = gain.ewm(alpha=1/periods, min_periods=periods).mean()
@@ -119,6 +129,9 @@ class TrendAnalyzer:
                     st.warning(f"Indicadores faltando para {ticker}.")
                     continue
                 shift_val = self.forecast_shift[ticker]
+                if len(df) <= shift_val:
+                    st.warning(f"Dados insuficientes para {ticker} com previsão de {shift_val} dias.")
+                    continue
                 X = df[features].iloc[:-shift_val]
                 y = np.where(df['Close'].shift(-shift_val).iloc[:-shift_val] > df['Close'].iloc[:-shift_val], 1, 0)
                 class_dist = pd.Series(y).value_counts(normalize=True)
@@ -260,8 +273,11 @@ tickers_default = ['PETR4', 'VALE3', 'ITUB4', 'NVDA', 'USDBRL=X']
 custom_tickers = st.sidebar.text_input("Tickers (separados por vírgula)", value=", ".join(tickers_default))
 start_date_input = st.sidebar.date_input("Data de Início", date.today() - timedelta(days=365))
 end_date_input = st.sidebar.date_input("Data de Término", date.today())
+
+# Novo campo para período padrão global
+default_forecast = st.sidebar.number_input("Período de Previsão Padrão (dias)", min_value=1, value=1, step=1)
 forecast_shifts = st.sidebar.text_input(
-    "Período de Previsão por Ticker (ex.: PETR4:1,VALE3:3, ou deixe vazio para 1 dia padrão)",
+    "Período de Previsão por Ticker (ex.: PETR4:30,VALE3:90; opcional)",
     value=""
 )
 
@@ -275,19 +291,25 @@ run_predict = st.sidebar.checkbox("Previsões Diárias", value=True)
 if st.sidebar.button("Executar Análise"):
     with st.spinner("Executando..."):
         tickers = [t.strip() for t in custom_tickers.split(",") if t.strip()]
-        forecast_dict = {}
+        forecast_dict = {ticker: default_forecast for ticker in tickers}  # Padrão global
         if forecast_shifts:
             try:
                 for item in forecast_shifts.split(","):
                     if ":" in item:
                         ticker, days = item.split(":")
-                        forecast_dict[ticker.strip()] = int(days.strip())
+                        days = int(days.strip())
+                        if days <= 0:
+                            st.warning(f"Período inválido ({days}) para {ticker}. Usando padrão.")
+                            continue
+                        if ticker.strip() in tickers:
+                            forecast_dict[ticker.strip()] = days
+                        else:
+                            st.warning(f"Ticker {ticker} não está na lista principal. Ignorando.")
                     else:
                         st.warning(f"Formato inválido em '{item}'. Use 'TICKER:DIAS'. Ignorando este item.")
             except ValueError as e:
-                st.error(f"Erro no formato de 'Período de Previsão': {e}. Use 'TICKER:DIAS' (ex.: PETR4:1,VALE3:3). Usando padrão de 1 dia.")
-                forecast_dict = None
-        analyzer = TrendAnalyzer(tickers, str(start_date_input), str(end_date_input), forecast_dict or None)
+                st.error(f"Erro no formato de 'Período de Previsão': {e}. Use 'TICKER:DIAS' (ex.: PETR4:30). Usando padrão.")
+        analyzer = TrendAnalyzer(tickers, str(start_date_input), str(end_date_input), forecast_dict)
         pred_df = analyzer.run_pipeline(run_fetch, run_prepare, run_train, run_evaluate, run_predict)
         
         st.success("Análise concluída!")
