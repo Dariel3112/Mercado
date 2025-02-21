@@ -1,5 +1,5 @@
 # Mercado
-Relatorio-acoes
+# Relatorio-acoes
 import os
 import logging
 import numpy as np
