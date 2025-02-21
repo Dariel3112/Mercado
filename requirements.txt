@@ -11,3 +11,12 @@ pandas
 scikit-learn
 xgboost
 matplotlib
+numpy
+pandas
+yfinance
+scikit-learn
+xgboost
+matplotlib
+streamlit
+imbalanced-learn
+plotly
