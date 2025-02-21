@@ -18,12 +18,11 @@ import streamlit as st
 # Configuração do logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Classe de análise de tendências
 class TrendAnalyzer:
     def __init__(self, tickers: list, start_date: str, end_date: str) -> None:
         """
         Inicializa o analisador de tendências.
-        :param tickers: Lista de tickers. Para ações brasileiras sem sufixo, ".SA" será adicionado.
+        :param tickers: Lista de tickers. Para ações brasileiras que terminam com dígito, ".SA" será adicionado.
         :param start_date: Data de início (formato 'YYYY-MM-DD').
         :param end_date: Data de término (formato 'YYYY-MM-DD').
         """
@@ -36,9 +35,16 @@ class TrendAnalyzer:
         self.report = ""
 
     def _get_symbol(self, ticker: str) -> str:
+        """
+        Retorna o símbolo adequado para o yfinance.
+        Se o ticker já contiver '.' ou '=', assume que está completo.
+        Se o ticker terminar com um dígito (ex.: 'PETR4'), adiciona '.SA'; caso contrário, retorna o ticker.
+        """
         if "." in ticker or "=" in ticker:
             return ticker
-        return ticker + ".SA"
+        if ticker and ticker[-1].isdigit():
+            return ticker + ".SA"
+        return ticker
 
     def fetch_data(self) -> None:
         """
@@ -189,11 +195,12 @@ class TrendAnalyzer:
                 except Exception as e:
                     self.report += f"Erro ao avaliar o modelo {model_name} para {ticker}: {e}\n"
 
-    def predict_daily(self) -> None:
+    def predict_daily(self) -> pd.DataFrame:
         """
         Realiza previsões diárias utilizando cada modelo e sugere operações de compra ou venda.
+        Retorna um DataFrame com os resultados para facilitar a visualização e o download.
         """
-        self.report += "\n--- Previsões Diárias e Sugestões ---\n"
+        results = []
         for ticker, model_dict in self.models.items():
             try:
                 df = self.data[ticker]
@@ -202,14 +209,24 @@ class TrendAnalyzer:
                 latest_features = df[features].iloc[-1:]
                 scaler = self.prepared_data[ticker]['scaler']
                 latest_scaled = scaler.transform(latest_features)
-                self.report += f"\nTicker: {ticker}\n"
+                pred_dict = {"Ticker": ticker}
                 for model_name, model in model_dict.items():
                     prediction = model.predict(latest_scaled)
                     trend = "Alta" if prediction[0] == 1 else "Baixa"
                     suggestion = "Comprar" if prediction[0] == 1 else "Vender"
-                    self.report += f"{model_name}: Tendência prevista: {trend}. Sugestão: {suggestion}.\n"
+                    pred_dict[f"{model_name}_Tendencia"] = trend
+                    pred_dict[f"{model_name}_Sugestao"] = suggestion
+                results.append(pred_dict)
             except Exception as e:
-                self.report += f"Erro na previsão para {ticker}: {e}\n"
+                st.error(f"Erro na previsão para {ticker}: {e}")
+        pred_df = pd.DataFrame(results)
+        # Acrescenta os resultados ao relatório em formato texto, se desejado
+        self.report += "\n--- Previsões Diárias e Sugestões ---\n"
+        for index, row in pred_df.iterrows():
+            self.report += f"\nTicker: {row['Ticker']}\n"
+            for model in ['RandomForest', 'XGBoost', 'LogisticRegression']:
+                self.report += f"{model}: Tendência prevista: {row.get(f'{model}_Tendencia', 'N/A')}. Sugestão: {row.get(f'{model}_Sugestao', 'N/A')}.\n"
+        return pred_df
 
     def save_report(self) -> None:
         """
@@ -223,9 +240,9 @@ class TrendAnalyzer:
         except Exception as e:
             st.error(f"Erro ao salvar relatório: {e}")
 
-    def run_pipeline(self, run_fetch=True, run_prepare=True, run_train=True, run_evaluate=True, run_predict=True) -> None:
+    def run_pipeline(self, run_fetch=True, run_prepare=True, run_train=True, run_evaluate=True, run_predict=True) -> pd.DataFrame:
         """
-        Executa o pipeline completo conforme as etapas selecionadas.
+        Executa o pipeline completo conforme as etapas selecionadas e retorna o DataFrame de previsões.
         """
         if run_fetch:
             self.fetch_data()
@@ -235,11 +252,13 @@ class TrendAnalyzer:
             self.train_models()
         if run_evaluate:
             self.evaluate_models()
+        pred_df = None
         if run_predict:
-            self.predict_daily()
+            pred_df = self.predict_daily()
         self.save_report()
+        return pred_df
 
-# Interface Streamlit
+# Interface do Streamlit
 st.title("Análise de Tendências - Interface Interativa")
 
 st.sidebar.header("Configurações")
@@ -266,6 +285,22 @@ if st.sidebar.button("Executar Análise Completa"):
         # Processa os tickers informados
         tickers = [t.strip() for t in custom_tickers.split(",") if t.strip()]
         analyzer = TrendAnalyzer(tickers, str(start_date_input), str(end_date_input))
-        analyzer.run_pipeline(run_fetch=run_fetch, run_prepare=run_prepare, run_train=run_train, run_evaluate=run_evaluate, run_predict=run_predict)
+        pred_df = analyzer.run_pipeline(run_fetch=run_fetch, run_prepare=run_prepare, run_train=run_train,
+                                        run_evaluate=run_evaluate, run_predict=run_predict)
         st.success("Análise concluída!")
-        st.text_area("Relatório Gerado", analyzer.report, height=600)
+        st.subheader("Relatório Completo")
+        st.text_area("Relatório", analyzer.report, height=400)
+        
+        if pred_df is not None and not pred_df.empty:
+            st.subheader("Previsões Diárias e Sugestões")
+            st.dataframe(pred_df)
+            # Permite o download em CSV
+            csv_data = pred_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Baixar Previsões (CSV)",
+                data=csv_data,
+                file_name='previsoes.csv',
+                mime='text/csv'
+            )
+        else:
+            st.warning("Nenhuma previsão foi gerada.")
