@@ -113,10 +113,14 @@ class TrendAnalyzer:
                     st.warning(f"Indicadores faltando para {ticker}.")
                     continue
 
-                # Ajusta os dados com base no forecast_shift
                 shift_val = self.forecast_shift
-                X = df[features].iloc[:-shift_val]  # Remove as últimas linhas sem target
-                y = np.where(df['Close'].shift(-shift_val).iloc[:-shift_val] > df['Close'].iloc[:-shift_val], 1, 0)
+                # Remove as últimas shift_val linhas que não têm dado futuro para comparação
+                X = df[features].iloc[:-shift_val]
+                y = np.where(
+                    df['Close'].shift(-shift_val).iloc[:-shift_val] > df['Close'].iloc[:-shift_val],
+                    1,
+                    0
+                )
 
                 X_train, X_test, y_train, y_test = train_test_split(
                     X, y, test_size=0.2, random_state=42, stratify=y
@@ -199,6 +203,42 @@ class TrendAnalyzer:
                 except Exception as e:
                     self.report += f"Erro ao avaliar o modelo {model_name} para {ticker}: {e}\n"
 
+    def _majority_vote(self, values: list[str], tipo: str = "Tendencia") -> str:
+        """
+        Retorna uma string indicando se há unanimidade ou maioria (2x1) entre os valores.
+        :param values: Lista de strings (por ex.: ["Alta", "Alta", "Baixa"]).
+        :param tipo: "Tendencia" ou "Sugestao" (usado só para deixar o retorno mais claro).
+        :return: "Unânime Alta", "Maioria Alta (2x1)", "Unânime Baixa", "Maioria Baixa (2x1)"
+                 ou no caso de sugestão: "Unânime Comprar", "Maioria Comprar (2x1)", etc.
+        """
+        # Exemplo de valores para tipo="Tendencia": ["Alta", "Alta", "Baixa"]
+        # Exemplo de valores para tipo="Sugestao": ["Comprar", "Comprar", "Vender"]
+        if tipo == "Tendencia":
+            positive_word = "Alta"
+            negative_word = "Baixa"
+            unanimidade_pos = "Unânime Alta"
+            unanimidade_neg = "Unânime Baixa"
+            maioria_pos = "Maioria Alta (2x1)"
+            maioria_neg = "Maioria Baixa (2x1)"
+        else:  # tipo == "Sugestao"
+            positive_word = "Comprar"
+            negative_word = "Vender"
+            unanimidade_pos = "Unânime Comprar"
+            unanimidade_neg = "Unânime Vender"
+            maioria_pos = "Maioria Comprar (2x1)"
+            maioria_neg = "Maioria Vender (2x1)"
+
+        count_pos = sum([1 for v in values if v == positive_word])
+        # Possíveis contagens: 0,1,2,3
+        if count_pos == 3:
+            return unanimidade_pos
+        elif count_pos == 2:
+            return maioria_pos
+        elif count_pos == 1:
+            return maioria_neg
+        else:  # count_pos == 0
+            return unanimidade_neg
+
     def predict_daily(self) -> pd.DataFrame:
         """
         Realiza previsões para o período de previsão definido (forecast_shift dias à frente)
@@ -211,25 +251,44 @@ class TrendAnalyzer:
                 df = self.data[ticker]
                 features = ['MA20', 'MA50', 'Daily_Return', 'RSI', 'Volume',
                             'BB_upper', 'BB_lower', 'MACD', 'Signal_Line']
+                # Pega apenas a última linha para prever
                 latest_features = df[features].iloc[-1:]
                 scaler = self.prepared_data[ticker]['scaler']
                 latest_scaled = scaler.transform(latest_features)
                 pred_dict = {"Ticker": ticker}
+
+                # Armazena previsões para comparar no final
+                tendencia_list = []
+                sugestao_list = []
+
                 for model_name, model in model_dict.items():
                     prediction = model.predict(latest_scaled)
                     trend = "Alta" if prediction[0] == 1 else "Baixa"
                     suggestion = "Comprar" if prediction[0] == 1 else "Vender"
                     pred_dict[f"{model_name}_Tendencia"] = trend
                     pred_dict[f"{model_name}_Sugestao"] = suggestion
+
+                    tendencia_list.append(trend)
+                    sugestao_list.append(suggestion)
+
+                # Adiciona colunas de comparação (tendência e sugestão)
+                pred_dict["Tendencia_Comparacao"] = self._majority_vote(tendencia_list, tipo="Tendencia")
+                pred_dict["Sugestao_Comparacao"] = self._majority_vote(sugestao_list, tipo="Sugestao")
+
                 results.append(pred_dict)
             except Exception as e:
                 st.error(f"Erro na previsão para {ticker}: {e}")
         pred_df = pd.DataFrame(results)
+
+        # Inclui no relatório de texto
         self.report += "\n--- Previsões Diárias e Sugestões ---\n"
-        for index, row in pred_df.iterrows():
+        for _, row in pred_df.iterrows():
             self.report += f"\nTicker: {row['Ticker']}\n"
             for model in ['RandomForest', 'XGBoost', 'LogisticRegression']:
-                self.report += f"{model}: Tendência prevista: {row.get(f'{model}_Tendencia', 'N/A')}. Sugestão: {row.get(f'{model}_Sugestao', 'N/A')}.\n"
+                self.report += f"{model}: Tendência prevista: {row.get(f'{model}_Tendencia', 'N/A')}."
+                self.report += f" Sugestão: {row.get(f'{model}_Sugestao', 'N/A')}.\n"
+            self.report += f"**Comparação** => Tendência: {row['Tendencia_Comparacao']}, Sugestão: {row['Sugestao_Comparacao']}\n"
+
         return pred_df
 
     def save_report(self) -> None:
@@ -262,7 +321,8 @@ class TrendAnalyzer:
         self.save_report()
         return pred_df
 
-# Interface do Streamlit
+# ========== INTERFACE STREAMLIT ==========
+
 st.title("Análise de Tendências - Interface Interativa")
 
 st.sidebar.header("Configurações")
@@ -290,15 +350,21 @@ if st.sidebar.button("Executar Análise Completa"):
         # Processa os tickers informados
         tickers = [t.strip() for t in custom_tickers.split(",") if t.strip()]
         analyzer = TrendAnalyzer(tickers, str(start_date_input), str(end_date_input), forecast_shift=forecast_shift)
-        pred_df = analyzer.run_pipeline(run_fetch=run_fetch, run_prepare=run_prepare, run_train=run_train,
-                                        run_evaluate=run_evaluate, run_predict=run_predict)
+        pred_df = analyzer.run_pipeline(
+            run_fetch=run_fetch,
+            run_prepare=run_prepare,
+            run_train=run_train,
+            run_evaluate=run_evaluate,
+            run_predict=run_predict
+        )
         st.success("Análise concluída!")
         st.subheader("Relatório Completo")
         st.text_area("Relatório", analyzer.report, height=400)
         
         if pred_df is not None and not pred_df.empty:
-            st.subheader("Previsões Diárias e Sugestões")
+            st.subheader("Previsões Diárias e Sugestões (com Comparação)")
             st.dataframe(pred_df)
+
             # Permite o download em CSV
             csv_data = pred_df.to_csv(index=False).encode('utf-8')
             st.download_button(
@@ -307,5 +373,15 @@ if st.sidebar.button("Executar Análise Completa"):
                 file_name='previsoes.csv',
                 mime='text/csv'
             )
+
+            # ========== Visualizações de Exemplo ==========
+            st.subheader("Visualização de Tendência por Modelo")
+            # Cria um DataFrame de contagem de "Alta"/"Baixa" para cada modelo
+            for model in ["RandomForest", "XGBoost", "LogisticRegression"]:
+                tendencia_col = f"{model}_Tendencia"
+                if tendencia_col in pred_df.columns:
+                    contagem = pred_df[tendencia_col].value_counts()
+                    st.write(f"**{model}** - Contagem de 'Alta' vs 'Baixa':")
+                    st.bar_chart(contagem)
         else:
             st.warning("Nenhuma previsão foi gerada.")
